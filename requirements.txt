@@ -1,0 +1,12 @@
+pandas>=2.2
+numpy
+yfinance
+requests
+chronos-forecasting
+granite-tsfm
+torch>=2.2
+arch
+statsmodels
+scipy
+matplotlib
+pyarrow
