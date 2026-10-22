@@ -18,3 +18,8 @@ results/REVIEW.md
 __pycache__/
 .pytest_cache/
 *.pyc
+
+# validation re-score / re-run outputs: large derivable parquet only
+results_rescore/forecasts*.parquet
+results_rescore/losses*.parquet
+results_rerun/forecasts*.parquet
