@@ -23,3 +23,4 @@ __pycache__/
 results_rescore/forecasts*.parquet
 results_rescore/losses*.parquet
 results_rerun/forecasts*.parquet
+results_rerun/losses*.parquet

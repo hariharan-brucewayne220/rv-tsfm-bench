@@ -13,12 +13,26 @@ Track B) and pinned to the original windows with the new `--end-date` option
 |---|---|---|
 | Re-score of cached forecasts vs committed tables | Matches exactly on 28 assets (DM statistic difference 0.000); all-asset ratios within 0.012 | Every committed table matches to 0.0 |
 | Econometric forecasts re-run from scratch | HAR, Log-HAR, AR1, EWMA identical to about 1e-14 on 28 assets; GARCH within 0.34% | Identical to about 1e-14; GARCH within 0.02% |
-| TSFM forecasts re-run | Not done: the HF weight CDN hosts are still blocked | Not done |
+| TSFM forecasts re-run from scratch (Chronos-Bolt tiny/small, TTM 512-96-ft-r2.1) | Median relative difference 2e-8, 99th percentile 5e-7 on 28 assets | Chronos within 0.7%, TTM within 1e-6 |
+| All models re-run, re-scored | Per-asset ratios within 0.001 of the cached-forecast re-score on 28 assets; mean ratios equal to 4 decimals | Committed tables reproduced within 3e-5 |
 
-The two Track A exceptions come from data revisions, not code. Yahoo now has
-33 extra GC=F rows inside the test window, and one fewer USDCHF=X row,
-which shifts that asset's refit schedule by a day. The small GARCH
-differences match an `arch` optimizer version change.
+The two Track A exceptions come from data revisions, not code:
+- GC=F: the original download was missing about 33 trading days inside the
+  test window, which Yahoo has since filled. Re-scoring the *cached* GC=F
+  forecasts on the new data is therefore not valid. That alone explains why
+  the all-asset Track A tables differ from the committed ones (by up to 0.034
+  in the full re-run). `results_rerun/` is the self-consistent reference.
+- USDCHF=X: Yahoo now has one fewer row, which shifts its refit schedule by a
+  day.
+
+Smaller notes:
+- The GARCH differences match an `arch` optimizer version change.
+- 296 of 126,000 cached Chronos rows differ by more than 1e-4 (at most 4%).
+  All of them fall in one Aug to Sep 2025 block at h=5 and h=22, on the six
+  `--quick` tickers, which suggests those cached forecasts came from an
+  earlier run. The effect on tables is below 0.001.
+- Loading the TTM checkpoint gives exactly 855,100 parameters.
+- Chronos-Bolt's returned mean equals its 0.5 quantile bit-for-bit.
 
 Other checks:
 - Unit tests: 16 of 16 pass. That includes a fix to the timestamp test,
@@ -82,36 +96,38 @@ Not replicated: TTM beating Log-HAR at h=5 and h=22. The repo is far worse there
    **Measured like-for-like result.** These are per-asset mean QLIKE ratios,
    each recalibrated model vs Log-HAR recalibrated the same way, on common
    origins. DM columns give the percent of assets significantly better or
-   worse at 5 percent. Source: `results_rescore/tables{,_crypto}/mz_like_for_like.md`.
+   worse at 5 percent. Source: the full re-run,
+   `results_rerun/tables{,_crypto}/mz_like_for_like.md`. The cached-forecast
+   re-score in `results_rescore/` agrees within about 0.01.
 
    Repo scheme (rolling 250-day, log-log):
 
    | Model | Track A ratio h=1/5/22 | A better / worse | Track B ratio h=1/5/22 | B better / worse |
    |---|---|---|---|---|
-   | TTM | 1.004 / 1.000 / 0.979 | 0/3/0 , 7/0/0 | 0.888 / 1.006 / 1.012 | 40/20/20 , 0/0/0 |
-   | Chronos-Bolt-S | 0.982 / 1.006 / 1.002 | 10/3/0 , 0/7/3 | 0.902 / 1.003 / 1.013 | 40/0/0 , 0/0/0 |
-   | EW-ENS | 0.993 / 0.989 / 0.979 | 7/7/0 , 0/0/0 | 0.909 / 0.984 / 0.997 | 60/40/20 , 0/0/0 |
-   | HAR | 1.000 / 1.034 / 1.098 | 10/3/0 , 10/27/13 | 1.088 / 1.180 / 1.269 | 0/0/0 , 40/40/20 |
-   | Log-HAR+MZ vs raw Log-HAR | 1.001 / 1.089 / 1.362 | | 1.031 / 1.115 / 1.206 | |
+   | TTM | 1.003 / 0.999 / 0.976 | 0/3/0 , 7/0/0 | 0.888 / 1.006 / 1.012 | 40/20/20 , 0/0/0 |
+   | Chronos-Bolt-S | 0.986 / 1.011 / 0.991 | 7/0/0 , 0/7/3 | 0.902 / 1.003 / 1.013 | 40/0/0 , 0/0/0 |
+   | EW-ENS | 0.992 / 0.988 / 0.977 | 10/7/0 , 0/0/0 | 0.909 / 0.984 / 0.997 | 60/40/20 , 0/0/0 |
+   | HAR | 1.004 / 1.040 / 1.096 | 7/0/0 , 10/27/13 | 1.088 / 1.180 / 1.269 | 0/0/0 , 40/40/20 |
+   | Log-HAR+MZ vs raw Log-HAR | 1.026 / 1.116 / 1.386 | | 1.031 / 1.115 / 1.206 | |
 
    Paper scheme (expanding window, levels, 252-day warm-up):
 
    | Model | Track A ratio h=1/5/22 | Track B ratio h=1/5/22 |
    |---|---|---|
-   | TTM | 0.987 / 0.961 / 0.931 | 0.908 / 0.973 / 0.954 |
-   | Chronos-Bolt-S | 0.961 / 0.963 / 0.922 | 0.909 / 0.977 / 0.964 |
-   | EW-ENS | 0.983 / 0.965 / 0.953 | 0.929 / 0.968 / 0.967 |
-   | Log-HAR+MZL vs raw Log-HAR | 1.035 / 1.142 / 1.535 | 1.020 / 1.057 / 1.053 |
+   | TTM | 0.986 / 0.963 / 0.933 | 0.908 / 0.973 / 0.954 |
+   | Chronos-Bolt-S | 0.965 / 0.974 / 0.933 | 0.909 / 0.977 / 0.964 |
+   | EW-ENS | 0.982 / 0.967 / 0.956 | 0.929 / 0.968 / 0.967 |
+   | Log-HAR+MZL vs raw Log-HAR | 1.057 / 1.165 / 1.556 | 1.020 / 1.057 / 1.053 |
 
    What this changes:
    - README finding 2 ("econometrics wins decisively at h=5 and h=22")
      holds only for raw forecasts. Under equal recalibration the gap closes
      to parity (repo scheme), or reverses in the TSFMs' favor (paper scheme,
-     0.92 to 0.97 at h=22 on both tracks). The long-horizon TSFM losses are
+     0.93 to 0.97 at h=22 on both tracks). The long-horizon TSFM losses are
      mostly a scaling problem, not missing dynamics. That matches the
      paper's "genuine gain at the monthly horizon".
    - README finding 1's "Track A TTM edge is calibration" is not supported.
-     TTM had no raw edge to explain (0.995 re-scored), and it stays at
+     TTM had no raw edge to explain (0.996 in the full re-run), and it stays at
      parity after recalibration.
    - The Track B h=1 edges are real. TTM is 0.888 like-for-like, better on
      2 of 5 symbols and worse on none.
@@ -137,15 +153,14 @@ Not replicated: TTM beating Log-HAR at h=5 and h=22. The repo is far worse there
    so it neither removes mean bias nor rescales the slope. It is not an affine
    MZ correction.
 
-## To finish the re-run
-
-Only the TSFM forecasts remain. Allow the Hugging Face weight hosts
-(cas-server.xethub.hf.co, cas-bridge.xethub.hf.co, transfer.xethub.hf.co,
-us.aws.cdn.hf.co, cdn-lfs.hf.co) and run:
+## How to reproduce
 
 ```
-python -m src.run --track a --stage forecast --models ChronosBoltTiny,ChronosBoltSmall,TTM --end-date 2026-07-10 --out results_rerun
-python -m src.run --track b --stage forecast --models ChronosBoltTiny,ChronosBoltSmall,TTM --end-date 2026-06-30 --out results_rerun
+python -m src.run --track a --end-date 2026-07-10 --out results_rerun
+python -m src.run --track b --end-date 2026-06-30 --out results_rerun
 ```
 
-`granite-tsfm` 0.3.11 pins `torch<2.12`.
+On 4 CPU cores, the Track A TSFM forecasts take about 12 minutes and
+evaluation about 5. Note that `granite-tsfm` 0.3.11 pins `torch<2.12`; the
+run here used torch 2.14 with `--no-deps` and worked. Downloading the weights
+needs the Hugging Face Xet/CDN hosts as well as huggingface.co.
