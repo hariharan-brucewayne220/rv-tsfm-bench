@@ -92,6 +92,29 @@ Not replicated: TTM beating Log-HAR at h=5 and h=22. The repo is far worse there
    edges survive, and get stronger.
    This should be confirmed by rerunning with Log-HAR+MZ as the reference.
 
+   **Tooling added for that re-run.** The evaluate stage now builds two MZ
+   arms, each compared against Log-HAR recalibrated the same way:
+   - `+MZ`: the original method, a rolling 250-pair log-log fit.
+   - `+MZL`: the paper's Sec. 7 method, an expanding-window affine fit on the
+     volatility level with a 252-pair warm-up. It is floored at half the
+     smallest realized target in the fit window, so QLIKE stays defined.
+
+   Outputs:
+   - `results/tables{,_crypto}/mz_like_for_like.md`, with columns:
+     - `ratio_raw`: raw model vs raw Log-HAR.
+     - `ratio_mz`: recalibrated model vs recalibrated Log-HAR.
+     - `ref_mz_vs_raw`: whether the scheme helps Log-HAR itself.
+     - DM test shares of assets significantly better or worse vs the
+       recalibrated Log-HAR.
+   - `mz_like_for_like_per_asset.parquet`: the per-asset rows behind it.
+
+   The old `mz_effect` table is unchanged. To fill these tables, run
+   `python -m src.run --stage evaluate` and
+   `python -m src.run --track b --stage evaluate`. Both need the raw data,
+   since no realized targets are cached. Tests: `tests/test_mz.py`. They
+   cover no look-ahead under both schemes, exact recovery of an affine bias,
+   and a scale-biased copy of Log-HAR scoring exactly 1.0 like-for-like.
+
 2. **Evaluation targets are winsorized with full-sample percentiles.**
    `var_d` is clipped at the 0.01 and 99.9 percentiles over the whole history
    (`src/data.py:165`, `src/data_crypto.py:237`), and the targets are built from

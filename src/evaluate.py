@@ -63,37 +63,73 @@ def dm_test(loss_a: np.ndarray, loss_b: np.ndarray, h: int) -> tuple[float, floa
     return float(stat), float(pval)
 
 
+# MZ schemes, keyed by the model-name suffix their rows carry:
+#   "+MZ"  rolling_log: ln(target) = a + b ln(fcst), trailing 250 pairs,
+#          min 60 pairs, lognormal back-transform (original arm).
+#   "+MZL" expanding_level: target_rv = a + b fcst_rv on an expanding window,
+#          252-pair warm-up (the paper's Sec. 7 scheme, volatility scale).
+MZ_SCHEMES = {
+    "rolling_log": {"tag": "+MZ", "window": 250, "min_obs": 60},
+    "expanding_level": {"tag": "+MZL", "window": None, "min_obs": 252},
+}
+MZ_TAGS = tuple(s["tag"] for s in MZ_SCHEMES.values())
+
+
+def split_mz_name(model: str) -> tuple[str, str]:
+    """'TTM+MZL' -> ('TTM', '+MZL'); raw names return (model, '')."""
+    for tag in sorted(MZ_TAGS, key=len, reverse=True):
+        if model.endswith(tag):
+            return model[:-len(tag)], tag
+    return model, ""
+
+
 def mz_recalibrate(fcst: pd.DataFrame, targets: pd.DataFrame, h: int,
-                   window: int = 250, min_obs: int = 60,
-                   ann: float = 252.0) -> pd.DataFrame:
-    """Rolling log-log MZ recalibration of one (asset, model, h) forecast frame.
+                   window: int | None = 250, min_obs: int = 60,
+                   ann: float = 252.0,
+                   scheme: str = "rolling_log") -> pd.DataFrame:
+    """MZ recalibration of one (asset, model, h) forecast frame.
 
     fcst: index origin_date, column fcst_rv. targets: origin_date, target_rv
     for this asset and h. For origin at position k (consecutive test origins),
-    fits ln(target) = a + b ln(fcst) on the trailing `window` pairs at
-    positions p <= k - h (fully realized, no lookahead), expanding until
-    `window` pairs exist; NaN before `min_obs` pairs.
+    the fit uses only pairs at positions p <= k - h (fully realized, no
+    lookahead), the trailing `window` of them (window=None: all of them);
+    NaN before `min_obs` pairs.
+
+    scheme="rolling_log": ln(target) = a + b ln(fcst), back-transformed with
+    half the residual variance. scheme="expanding_level": target_rv = a + b
+    fcst_rv in volatility levels; the result is floored at half the smallest
+    realized target in the fit window so QLIKE stays defined.
     """
+    if scheme not in MZ_SCHEMES:
+        raise ValueError(f"unknown MZ scheme {scheme!r}")
+    log_space = scheme == "rolling_log"
     tgt = targets.set_index("origin_date")["target_rv"]
     merged = fcst[["fcst_rv"]].join(tgt, how="inner").sort_index()
-    x = np.log(np.maximum(merged["fcst_rv"].to_numpy(), 1e-12))
-    y = np.log(merged["target_rv"].to_numpy())
+    if log_space:
+        x = np.log(np.maximum(merged["fcst_rv"].to_numpy(), 1e-12))
+        y = np.log(merged["target_rv"].to_numpy())
+    else:
+        x = merged["fcst_rv"].to_numpy(dtype=float)
+        y = merged["target_rv"].to_numpy(dtype=float)
     T = len(merged)
     recal = np.full(T, np.nan)
     for k in range(T):
         e = k - h
         if e < 0:
             continue
-        lo = max(0, e - window + 1)
+        lo = 0 if window is None else max(0, e - window + 1)
         xs, ys = x[lo:e + 1], y[lo:e + 1]
         ok = np.isfinite(xs) & np.isfinite(ys)
         xs, ys = xs[ok], ys[ok]
         if len(xs) < min_obs or np.std(xs) < 1e-10 or not np.isfinite(x[k]):
             continue
         b, a = np.polyfit(xs, ys, 1)
-        resid = ys - (a + b * xs)
-        s2 = float(np.sum(resid**2) / max(1, len(xs) - 2))
-        recal[k] = np.exp(a + b * x[k] + 0.5 * s2)
+        if log_space:
+            resid = ys - (a + b * xs)
+            s2 = float(np.sum(resid**2) / max(1, len(xs) - 2))
+            recal[k] = np.exp(a + b * x[k] + 0.5 * s2)
+        else:
+            recal[k] = max(a + b * x[k], 0.5 * float(ys.min()))
     out = pd.DataFrame({"fcst_rv": recal}, index=merged.index)
     out["fcst_var"] = out["fcst_rv"]**2 / ann
     return out
@@ -127,29 +163,33 @@ def add_ensemble(forecasts: pd.DataFrame,
 
 
 def add_mz_rows(forecasts: pd.DataFrame, targets: pd.DataFrame,
-                window: int = 250, min_obs: int = 60,
-                ann: float = 252.0) -> pd.DataFrame:
-    """Append '<model>+MZ' recalibrated rows for every raw (asset, model, h)."""
+                ann: float = 252.0,
+                schemes: tuple[str, ...] = tuple(MZ_SCHEMES)) -> pd.DataFrame:
+    """Append recalibrated rows ('<model>+MZ', '<model>+MZL', per
+    MZ_SCHEMES) for every raw (asset, model, h). Existing recalibrated rows
+    are dropped and rebuilt."""
     raw = forecasts[~forecasts["recalibrated"]]
     new_rows = []
     for (asset, model, h), grp in raw.groupby(["asset", "model", "h"]):
         tgt = targets[(targets["asset"] == asset) & (targets["h"] == h)]
         fr = grp.set_index("origin_date")[["fcst_rv"]]
-        rec = mz_recalibrate(fr, tgt, int(h), window=window, min_obs=min_obs,
-                             ann=ann)
-        rec = rec.dropna()
-        if len(rec) == 0:
-            continue
-        sub = pd.DataFrame({
-            "asset": asset,
-            "model": f"{model}+MZ",
-            "h": np.int8(h),
-            "origin_date": rec.index,
-            "fcst_var": rec["fcst_var"].to_numpy(),
-            "fcst_rv": rec["fcst_rv"].to_numpy(),
-            "recalibrated": True,
-        })
-        new_rows.append(sub)
+        for scheme in schemes:
+            spec = MZ_SCHEMES[scheme]
+            rec = mz_recalibrate(fr, tgt, int(h), window=spec["window"],
+                                 min_obs=spec["min_obs"], ann=ann,
+                                 scheme=scheme)
+            rec = rec.dropna()
+            if len(rec) == 0:
+                continue
+            new_rows.append(pd.DataFrame({
+                "asset": asset,
+                "model": f"{model}{spec['tag']}",
+                "h": np.int8(h),
+                "origin_date": rec.index,
+                "fcst_var": rec["fcst_var"].to_numpy(),
+                "fcst_rv": rec["fcst_rv"].to_numpy(),
+                "recalibrated": True,
+            }))
     keep = forecasts[~forecasts["recalibrated"]]
     return pd.concat([keep] + new_rows, ignore_index=True)
 
@@ -205,6 +245,54 @@ def _per_asset_ratios(losses: pd.DataFrame, loss_col: str,
         rows.append({"asset": asset, "model": model, "h": int(h),
                      "ratio": float(m[loss_col].mean() / m["ref_loss"].mean()),
                      "n": len(m)})
+    return pd.DataFrame(rows)
+
+
+def mz_like_for_like(raw_losses: pd.DataFrame,
+                     mz_losses: pd.DataFrame) -> pd.DataFrame:
+    """Per (scheme, asset, model, h): compare <model><tag> with
+    <REFERENCE><tag> on the origins where raw model, raw reference and both
+    recalibrated forecasts all exist.
+
+    Columns: ratio_raw (raw model / raw ref), ratio_mz (model+tag /
+    ref+tag), ref_mz_vs_raw (ref+tag / raw ref: does the scheme itself help
+    the benchmark), DM stat and p-value of model+tag vs ref+tag.
+    """
+    tag_to_scheme = {v["tag"]: k for k, v in MZ_SCHEMES.items()}
+    cols = ["asset", "h", "origin_date", "qlike"]
+    rows = []
+    mz = mz_losses.assign(
+        base=mz_losses["model"].map(lambda m: split_mz_name(m)[0]),
+        tag=mz_losses["model"].map(lambda m: split_mz_name(m)[1]))
+    for tag, mz_t in mz.groupby("tag"):
+        ref_mz = mz_t[mz_t["base"] == REFERENCE][cols].rename(
+            columns={"qlike": "ref_mz"})
+        ref_raw = raw_losses[raw_losses["model"] == REFERENCE][cols].rename(
+            columns={"qlike": "ref_raw"})
+        for (asset, base, h), grp in mz_t.groupby(["asset", "base", "h"]):
+            raw_m = raw_losses[(raw_losses["asset"] == asset)
+                               & (raw_losses["model"] == base)
+                               & (raw_losses["h"] == h)][cols].rename(
+                columns={"qlike": "raw"})
+            m = (grp[cols].rename(columns={"qlike": "mz"})
+                 .merge(raw_m, on=["asset", "h", "origin_date"])
+                 .merge(ref_mz, on=["asset", "h", "origin_date"])
+                 .merge(ref_raw, on=["asset", "h", "origin_date"])
+                 .sort_values("origin_date"))
+            if len(m) < 30:
+                continue
+            stat, pval = (np.nan, np.nan) if base == REFERENCE else dm_test(
+                m["mz"].to_numpy(), m["ref_mz"].to_numpy(), int(h))
+            rows.append({
+                "scheme": tag_to_scheme[tag], "asset": asset, "model": base,
+                "h": int(h), "n": len(m),
+                "ratio_raw": float(m["raw"].mean() / m["ref_raw"].mean()),
+                "ratio_mz": float(m["mz"].mean() / m["ref_mz"].mean()),
+                "ref_mz_vs_raw": float(m["ref_mz"].mean()
+                                       / m["ref_raw"].mean()),
+                "dm_stat": stat, "pval": pval,
+                "sig_better": bool(pval < 0.05 and stat < 0),
+                "sig_worse": bool(pval < 0.05 and stat > 0)})
     return pd.DataFrame(rows)
 
 
@@ -267,13 +355,16 @@ def build_tables(forecasts: pd.DataFrame, targets: pd.DataFrame,
         dm_df.to_parquet(tables_dir / "dm_per_asset.parquet")
 
     # d. MZ effect: ratio vs raw Log-HAR before vs after recalibration,
-    #    computed on the origins where the +MZ forecast exists.
+    #    computed on the origins where the +MZ forecast exists (original
+    #    rolling log-log arm only, kept for continuity).
     mz_losses = losses[losses["recalibrated"]]
     if len(mz_losses):
         mz_rows = []
         for (asset, model_mz, h), grp in mz_losses.groupby(
                 ["asset", "model", "h"]):
-            base = model_mz[:-3]                      # strip "+MZ"
+            base, tag = split_mz_name(model_mz)
+            if tag != "+MZ":
+                continue
             raw_grp = raw_losses[(raw_losses["asset"] == asset)
                                  & (raw_losses["model"] == base)
                                  & (raw_losses["h"] == h)]
@@ -297,6 +388,25 @@ def build_tables(forecasts: pd.DataFrame, targets: pd.DataFrame,
             _write_table(mz_tbl, "mz_effect", tables_dir,
                          "Mean QLIKE ratio vs Log-HAR before vs after "
                          "MZ recalibration (common origins)")
+
+        lfl = mz_like_for_like(raw_losses, mz_losses)
+        if len(lfl):
+            tables["mz_like_for_like_per_asset"] = lfl
+            lfl.to_parquet(tables_dir / "mz_like_for_like_per_asset.parquet")
+            agg = lfl.groupby(["scheme", "model", "h"]).agg(
+                ref_mz_vs_raw=("ref_mz_vs_raw", "mean"),
+                ratio_raw=("ratio_raw", "mean"),
+                ratio_mz=("ratio_mz", "mean"),
+                pct_better=("sig_better", lambda s: 100.0 * s.mean()),
+                pct_worse=("sig_worse", lambda s: 100.0 * s.mean()))
+            lfl_tbl = agg.unstack("h")
+            tables["mz_like_for_like"] = lfl_tbl
+            _write_table(lfl_tbl, "mz_like_for_like", tables_dir,
+                         "Like-for-like MZ: each recalibrated model vs the "
+                         "recalibrated Log-HAR under the same scheme "
+                         "(per-asset QLIKE ratio means; DM percent of "
+                         "assets significantly better / worse at 5 "
+                         "percent; common origins)")
 
     return tables
 
