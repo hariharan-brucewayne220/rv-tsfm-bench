@@ -113,7 +113,7 @@ def test_timestamp_unit_and_header_detection(tmp_path):
                                freq="1min")
     rng = np.random.default_rng(1)
     closes = 100.0 + np.cumsum(rng.normal(0, 0.01, size=len(open_times)))
-    epoch_ns = open_times.asi8
+    epoch_ns = open_times.as_unit("ns").asi8
 
     variants = {}
     for unit, div in (("ms", 10**6), ("us", 10**3)):
