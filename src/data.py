@@ -127,12 +127,17 @@ def yang_zhang_var(df: pd.DataFrame, window: int = 22) -> pd.Series:
 
 
 def build_asset(ticker: str, asset_class: str, cache_dir: Path,
-                force: bool = False) -> AssetData | None:
+                force: bool = False,
+                end_date: str | None = None) -> AssetData | None:
+    """end_date (inclusive, 'YYYY-MM-DD') truncates the cached download so a
+    run can be pinned to a fixed data window."""
     try:
         raw = download_ohlc(ticker, START_DATE, cache_dir, force=force)
     except Exception as exc:
         print(f"  DROP {ticker}: download failed ({exc})")
         return None
+    if end_date is not None:
+        raw = raw[raw.index <= pd.Timestamp(end_date)]
 
     df = clean_ohlc(raw, ticker)
     if len(df) < MIN_ROWS:
@@ -188,14 +193,16 @@ def build_asset(ticker: str, asset_class: str, cache_dir: Path,
 
 
 def load_universe(cache_dir: Path, quick: bool = False,
-                  force: bool = False) -> list[AssetData]:
+                  force: bool = False,
+                  end_date: str | None = None) -> list[AssetData]:
     universe = UNIVERSE
     if quick:
         wanted = set(QUICK_TICKERS)
         universe = [(t, c) for t, c in UNIVERSE if t in wanted]
     assets = []
     for ticker, asset_class in universe:
-        asset = build_asset(ticker, asset_class, cache_dir, force=force)
+        asset = build_asset(ticker, asset_class, cache_dir, force=force,
+                            end_date=end_date)
         if asset is not None:
             print(f"  OK   {ticker} ({asset_class}, {asset.rv_estimator}, "
                   f"{len(asset.df)} rows)")

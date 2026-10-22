@@ -221,6 +221,9 @@ def main() -> None:
     parser.add_argument("--force-download", action="store_true")
     parser.add_argument("--force-forecast", action="store_true")
     parser.add_argument("--out", default="results")
+    parser.add_argument("--end-date", default=None,
+                        help="last data day to use, YYYY-MM-DD (pins the "
+                             "test window; default: everything downloaded)")
     args = parser.parse_args()
 
     set_seeds(SEED)
@@ -246,7 +249,8 @@ def main() -> None:
         if track == "a":
             print("track a: loading universe")
             assets = load_universe(data_dir, quick=args.quick,
-                                   force=args.force_download)
+                                   force=args.force_download,
+                                   end_date=args.end_date)
             write_universe_md(assets, out_dir)
             store_path = out_dir / "forecasts.parquet"
             suffix, ann, example = "", 252.0, None
@@ -256,7 +260,8 @@ def main() -> None:
             print("track b: loading crypto universe")
             assets = load_crypto_universe(data_dir / "binance",
                                           quick=args.quick,
-                                          force=args.force_download)
+                                          force=args.force_download,
+                                          end_date=args.end_date)
             write_crypto_universe_md(assets, out_dir)
             store_path = out_dir / "forecasts_crypto.parquet"
             suffix, ann, example = "_crypto", ANN_CRYPTO, "BTCUSDT"

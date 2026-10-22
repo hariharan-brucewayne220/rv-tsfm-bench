@@ -253,15 +253,22 @@ def _daily_frame_from_1m(closes_1m: pd.Series) -> tuple[pd.DataFrame, dict]:
 
 def build_crypto_asset(symbol: str, cache_dir: Path, force: bool = False,
                        start_ym: str | None = None,
-                       min_rows: int = MIN_ROWS) -> AssetData | None:
+                       min_rows: int = MIN_ROWS,
+                       end_date: str | None = None) -> AssetData | None:
     """Download + parse all months for one symbol and build its AssetData.
+
+    end_date (inclusive, 'YYYY-MM-DD') caps the month range and drops later
+    days, so a run can be pinned to a fixed data window.
 
     A 404 at the start of the range advances the start month (listing-date
     slack, up to MAX_START_ADVANCES); a 404 strictly inside the range raises
     because Binance monthly archives have no legitimate interior holes.
     """
     start = start_ym or LISTING_MONTH[symbol]
-    months = month_range(start, last_complete_month())
+    end_ym = last_complete_month()
+    if end_date is not None:
+        end_ym = min(end_ym, str(pd.Period(end_date, freq="M")))
+    months = month_range(start, end_ym)
     parts: list[pd.Series] = []
     months_used: list[str] = []
     advances = 0
@@ -285,7 +292,13 @@ def build_crypto_asset(symbol: str, cache_dir: Path, force: bool = False,
         return None
 
     closes_1m = pd.concat(parts)
+    if end_date is not None:
+        # bar close instants up to and including midnight ending end_date
+        cutoff = pd.Timestamp(end_date) + pd.Timedelta(days=1)
+        closes_1m = closes_1m[closes_1m.index <= cutoff]
     df, stats = _daily_frame_from_1m(closes_1m)
+    if end_date is not None:
+        df = df[df.index <= pd.Timestamp(end_date)]
     if len(df) < min_rows:
         print(f"  DROP {symbol}: only {len(df)} usable days "
               f"(< {min_rows})")
@@ -308,11 +321,14 @@ def build_crypto_asset(symbol: str, cache_dir: Path, force: bool = False,
 
 
 def load_crypto_universe(cache_dir: Path, quick: bool = False,
-                         force: bool = False) -> list[AssetData]:
+                         force: bool = False,
+                         end_date: str | None = None) -> list[AssetData]:
     """All five symbols; under quick, 2 symbols and only the trailing
     QUICK_MONTHS complete months (enough history for 200 test origins)."""
     symbols = QUICK_SYMBOLS if quick else CRYPTO_SYMBOLS
     end = pd.Period(last_complete_month(), freq="M")
+    if end_date is not None:
+        end = min(end, pd.Period(end_date, freq="M"))
     assets = []
     for symbol in symbols:
         start_ym = LISTING_MONTH[symbol]
@@ -322,7 +338,8 @@ def load_crypto_universe(cache_dir: Path, quick: bool = False,
             start_ym = max(start_ym, quick_start)
             min_rows = QUICK_MIN_ROWS
         asset = build_crypto_asset(symbol, cache_dir, force=force,
-                                   start_ym=start_ym, min_rows=min_rows)
+                                   start_ym=start_ym, min_rows=min_rows,
+                                   end_date=end_date)
         if asset is not None:
             print(f"  OK   {symbol} (crypto, rv5m, {len(asset.df)} rows, "
                   f"{asset.notes['months']} months)")
